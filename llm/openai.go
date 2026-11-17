@@ -332,7 +332,7 @@ func (p *openaiProvider) Stream(ctx context.Context, req CompletionRequest) iter
 				r.Header.Set("content-type", "application/json")
 				r.Header.Set("authorization", "Bearer "+p.cfg.APIKey)
 				r.Header.Set("accept", "text/event-stream")
-			}, "openai")
+			}, "openai", stripReasoningFromBody)
 			if err != nil {
 				yield(StreamEvent{}, err)
 				return
@@ -415,6 +415,38 @@ func (p *openaiProvider) Stream(ctx context.Context, req CompletionRequest) iter
 // the assembled message, the normalized stop reason, and token usage. A 200
 // response whose body is an error object (some gateways do this instead of a 4xx)
 // is surfaced as an error rather than an empty completion.
+// stripReasoningFromBody rebuilds a Chat Completions request body with the
+// reasoning_content field removed from every assistant message. Used by the
+// self-healing repair when a strict endpoint rejects the echo with a 422.
+// Returns the original bytes unchanged when the body does not parse.
+func stripReasoningFromBody(body []byte) []byte {
+	var m map[string]any
+	if err := json.Unmarshal(body, &m); err != nil {
+		return body
+	}
+	msgs, ok := m["messages"].([]any)
+	if !ok {
+		return body
+	}
+	changed := false
+	for _, e := range msgs {
+		if msg, ok := e.(map[string]any); ok && msg["role"] == "assistant" {
+			if _, has := msg["reasoning_content"]; has {
+				delete(msg, "reasoning_content")
+				changed = true
+			}
+		}
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 func (p *openaiProvider) Complete(ctx context.Context, req CompletionRequest) (Message, string, Usage, error) {
 	body, err := p.buildBody(req, false)
 	if err != nil {
@@ -425,7 +457,7 @@ func (p *openaiProvider) Complete(ctx context.Context, req CompletionRequest) (M
 			r.Header.Set("content-type", "application/json")
 			r.Header.Set("authorization", "Bearer "+p.cfg.APIKey)
 			r.Header.Set("accept", "application/json")
-		}, "openai")
+		}, "openai", stripReasoningFromBody)
 		if err != nil {
 			return Message{}, "", Usage{}, err
 		}

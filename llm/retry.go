@@ -18,13 +18,14 @@ import (
 // surface. Context cancellation is never retried and interrupts the backoff.
 // Count comes from cfg.retries(), the wait between attempts from
 // cfg.retryDelay() (exponential by default, fixed when Config.RetryInterval is set).
-func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeaders func(*http.Request), errPrefix string) (*http.Response, error) {
+func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeaders func(*http.Request), errPrefix string, repair func([]byte) []byte) (*http.Response, error) {
 	// Rate limit once per logical request (outside the retry loop, so retries do
 	// not consume additional tokens). Shared across all callers of this provider.
 	if err := cfg.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
 	retries := cfg.retries()
+	repaired := false
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
@@ -35,6 +36,24 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 		resp, err := cfg.HTTPClient.Do(req)
 		if err == nil && resp.StatusCode == http.StatusOK {
 			return resp, nil
+		}
+
+		// Self-healing repair: strict schemas (Mistral) reject the
+		// reasoning_content echo with a 422 naming the field. When the caller
+		// supplies a repair, rebuild the body without it and restart with a full
+		// retry budget — this is a repair, not a retry.
+		if err == nil && resp.StatusCode == http.StatusUnprocessableEntity && repair != nil && !repaired {
+			data, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if strings.Contains(string(data), "reasoning_content") {
+				if nb := repair(body); len(nb) > 0 && !bytes.Equal(nb, body) {
+					body = nb
+					repaired = true
+					attempt = -1
+					continue
+				}
+			}
+			return nil, fmt.Errorf("%s: status %d: %s", errPrefix, resp.StatusCode, strings.TrimSpace(string(data)))
 		}
 
 		retryable := false
