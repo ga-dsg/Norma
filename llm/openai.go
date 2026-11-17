@@ -230,6 +230,17 @@ func (p *openaiProvider) buildBody(req CompletionRequest, stream bool) ([]byte, 
 
 	msgs := toOpenAIMessages(joinSystem(req.System), req.Messages)
 	msgs = sanitizeOpenAIMessages(msgs, thinking)
+	// Strict OpenAI-compatible schemas (Mistral and friends) forbid
+	// reasoning_content outright, so the echo has to be droppable at the
+	// boundary rather than decided inside toOpenAIMessages (which has no view
+	// of the endpoint's expectations).
+	if p.cfg.OmitReasoningContent {
+		for i := range msgs {
+			if msgs[i].Role == "assistant" {
+				msgs[i].ReasoningContent = ""
+			}
+		}
+	}
 
 	body := oaReq{
 		Model:       p.cfg.Model,

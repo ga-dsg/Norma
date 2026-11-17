@@ -96,6 +96,15 @@ type Config struct {
 	// to "reasoning_effort"; for Anthropic to "output_config":{"effort":...}.
 	// Typical values: low / medium / high / max.
 	ReasoningEffort string
+	// OmitReasoningContent, when true, strips reasoning_content from replayed
+	// assistant messages in FormatOpenAI requests. DeepSeek-style endpoints
+	// demand the echo while the request is in thinking mode; strict schemas —
+	// notably Mistral's, whose request model forbids the field outright
+	// (422 extra_forbidden) — must not receive it at all. Hosts should set this
+	// to true for endpoints that reject the field; a natural rule is "omit
+	// unless the request runs in thinking mode", since the echo is only ever
+	// required there. Anthropic and Responses formats are unaffected.
+	OmitReasoningContent bool
 	// MaxTokensField selects which request key carries the output cap on
 	// FormatOpenAI (Chat Completions). "" (default) sends the classic
 	// "max_tokens"; MaxTokensFieldCompletion sends "max_completion_tokens"
