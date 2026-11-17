@@ -12,9 +12,35 @@ import (
 
 type openaiProvider struct{ cfg Config }
 
+// flexContent decodes a Chat Completions "content" field that may arrive as a
+// plain string or as an array of typed parts (Mistral returns segmented
+// arrays); both flatten to a plain string. Marshaling always emits a string,
+// so request building is unaffected.
+type flexContent string
+
+func (f *flexContent) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		*f = flexContent(s)
+		return nil
+	}
+	var parts []struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(b, &parts); err == nil {
+		var out strings.Builder
+		for _, p := range parts {
+			out.WriteString(p.Text)
+		}
+		*f = flexContent(out.String())
+		return nil
+	}
+	return fmt.Errorf("openai: content: unsupported shape: %s", truncate(string(b), 120))
+}
+
 type oaMessage struct {
 	Role             string       `json:"role"`
-	Content          string       `json:"content,omitempty"`
+	Content          flexContent  `json:"content,omitempty"`
 	ReasoningContent string       `json:"reasoning_content,omitempty"`
 	ToolCalls        []oaToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string       `json:"tool_call_id,omitempty"`
@@ -70,7 +96,7 @@ type oaStreamOpts struct {
 func toOpenAIMessages(system string, msgs []Message) []oaMessage {
 	out := make([]oaMessage, 0, len(msgs)+1)
 	if system != "" {
-		out = append(out, oaMessage{Role: "system", Content: system})
+		out = append(out, oaMessage{Role: "system", Content: flexContent(system)})
 	}
 	for _, m := range msgs {
 		switch m.Role {
@@ -98,7 +124,7 @@ func toOpenAIMessages(system string, msgs []Message) []oaMessage {
 					om.ToolCalls = append(om.ToolCalls, tc)
 				}
 			}
-			om.Content = text.String()
+			om.Content = flexContent(text.String())
 			if s := reasoning.String(); s != "" {
 				om.ReasoningContent = s
 			}
@@ -112,7 +138,7 @@ func toOpenAIMessages(system string, msgs []Message) []oaMessage {
 			// preserves user/assistant alternation for gateways that enforce it
 			// (dropping it would leave two adjacent user messages).
 			if om.Content == "" && len(om.ToolCalls) == 0 {
-				om.Content = "…"
+				om.Content = flexContent("…")
 			}
 			out = append(out, om)
 		case RoleUser:
@@ -123,12 +149,12 @@ func toOpenAIMessages(system string, msgs []Message) []oaMessage {
 				case BlockText:
 					text.WriteString(b.Text)
 				case BlockToolResult:
-					toolMsgs = append(toolMsgs, oaMessage{Role: "tool", ToolCallID: b.ToolUseID, Content: flattenText(b.Content)})
+					toolMsgs = append(toolMsgs, oaMessage{Role: "tool", ToolCallID: b.ToolUseID, Content: flexContent(flattenText(b.Content))})
 				}
 			}
 			out = append(out, toolMsgs...)
 			if s := text.String(); s != "" {
-				out = append(out, oaMessage{Role: "user", Content: s})
+				out = append(out, oaMessage{Role: "user", Content: flexContent(s)})
 			}
 		}
 	}
@@ -432,7 +458,7 @@ func parseOpenAIResponse(raw []byte) (Message, string, Usage, error) {
 	var r struct {
 		Choices []struct {
 			Message struct {
-				Content          string       `json:"content"`
+				Content          flexContent  `json:"content"`
 				ReasoningContent string       `json:"reasoning_content"`
 				Reasoning        string       `json:"reasoning"`
 				ReasoningText    string       `json:"reasoning_text"`
@@ -476,7 +502,7 @@ func parseOpenAIResponse(raw []byte) (Message, string, Usage, error) {
 		blocks = append(blocks, ContentBlock{Type: BlockThinking, Thinking: think})
 	}
 	if ch.Message.Content != "" {
-		blocks = append(blocks, TextBlock(ch.Message.Content))
+		blocks = append(blocks, TextBlock(string(ch.Message.Content)))
 	} else if ch.Message.Refusal != "" {
 		// A refused turn carries content:null and the reason in `refusal`. Reading
 		// only content would hand the caller an empty assistant turn — the model
@@ -522,7 +548,7 @@ func parseOpenAIFrame(data string, started map[int]bool) (evs []StreamEvent, sto
 	var f struct {
 		Choices []struct {
 			Delta struct {
-				Content          string       `json:"content"`
+				Content          flexContent  `json:"content"`
 				ReasoningContent string       `json:"reasoning_content"`
 				Reasoning        string       `json:"reasoning"`
 				ReasoningText    string       `json:"reasoning_text"`
@@ -554,7 +580,7 @@ func parseOpenAIFrame(data string, started map[int]bool) (evs []StreamEvent, sto
 		evs = append(evs, StreamEvent{Type: SEThinkingDelta, Text: think})
 	}
 	if ch.Delta.Content != "" {
-		evs = append(evs, StreamEvent{Type: SETextDelta, Text: ch.Delta.Content})
+		evs = append(evs, StreamEvent{Type: SETextDelta, Text: string(ch.Delta.Content)})
 	}
 	if ch.Delta.Refusal != "" {
 		// See parseOpenAIResponse: a refusal streams in `refusal`, not `content`.
